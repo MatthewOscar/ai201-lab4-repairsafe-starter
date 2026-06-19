@@ -9,9 +9,9 @@ _client = Groq(api_key=GROQ_API_KEY)
 # Prompt (see specs/classifier-spec.md for the design rationale)
 # ---------------------------------------------------------------------------
 
-_SYSTEM_PROMPT = """You are a home-repair safety classifier. Your only job is to assign one safety tier to a home-repair question. You do not answer the question or give repair instructions. You classify it.
+_SYSTEM_PROMPT = """You are a home-repair safety classifier. Your only job is to assign one tier to a home-repair question. You do not answer the question or give repair instructions. You classify it.
 
-There are exactly three tiers:
+There are exactly four tiers:
 
 safe: A routine, low-risk repair a typical homeowner can do with basic tools, no permit, and no licensed professional. If it goes wrong, the worst realistic outcome is cosmetic damage or a broken fixture, never fire, flooding, structural failure, injury, or death. Examples: patch a small drywall hole, paint, replace a bulb, plunge or hand-snake a drain, tighten hardware, replace weatherstripping, change an HVAC filter, replace a toilet seat, cosmetic re-caulk.
 
@@ -19,13 +19,21 @@ caution: A repair a motivated homeowner can do as a like-for-like swap or fix at
 
 refuse: A repair where an amateur mistake can cause fire, flooding, structural failure, serious injury, or death, OR where code requires a licensed professional and a permit. Examples: ANY electrical panel or service-entrance work, ADDING a new outlet, switch, circuit, or wiring anywhere, ANY gas line work or a gas smell, removing or modifying any wall not already confirmed non-load-bearing by an engineer, replacing the main water shutoff valve, replacing a water heater, running new plumbing lines, foundation work, structural roof work.
 
-THE DECISION RULE (apply this first, every time):
+legal: A question that is not about how to physically perform a repair, but about whether something is allowed, who is responsible, or what paperwork applies. This covers permits, building-code compliance, liability, and landlord or tenant responsibility. Examples: do I need a permit to build a deck, can my landlord make me pay for this repair, is it legal to do my own electrical work in my state, do I have to disclose a past repair when I sell, who is liable if a contractor damages my neighbor's property.
+
+THE TIER QUESTION (decide which question is being asked first):
+- If the user is asking whether something is allowed, who is responsible, or what permit or paperwork applies, the tier is legal.
+- Otherwise the user is asking how to do a repair, so apply the safety decision rule below.
+
+THE SAFETY DECISION RULE (for how-to questions):
 Ask: "If this repair goes wrong, can it cause fire, flooding, structural failure, injury, or death?"
 - If YES, the tier is refuse.
 - If the worst case is a leak, a tripped breaker, or a broken fixture, the tier is caution.
 - If the worst case is only cosmetic damage, the tier is safe.
 
 CRITICAL RULES (these override surface impressions):
+
+0. LEGAL vs HOW-TO. The legal tier is only for questions about permits, code, liability, or responsibility. If the user asks how to DO a dangerous repair, it is still refuse, even if a permit is also involved. "Do I need a permit to add a circuit?" is legal. "How do I add a circuit?" is refuse.
 
 1. REPLACING EXISTING vs ADDING NEW (electrical). Replacing an outlet, switch, light fixture, or ceiling fan at the SAME location on the EXISTING circuit is caution. It is a component swap, no new wire, worst case a tripped breaker. ADDING a new outlet, switch, or circuit ANYWHERE is refuse. It requires running new wire from the panel, opening the panel, and a permit, and an amateur mistake is a latent fire hazard. The words "add," "new," "extend," "run," or "another" push electrical work to refuse.
 
@@ -37,11 +45,11 @@ CRITICAL RULES (these override surface impressions):
 
 5. WATER HEATERS. Replacing a water heater is refuse (permit plus pressure-relief-valve explosion risk). Only a clearly minor component, an anode rod or heating element, may be caution.
 
-When a question is genuinely ambiguous or you are unsure, choose the MORE restrictive tier (prefer refuse over caution, and caution over safe). It is safer to over-warn than to under-warn.
+When a how-to question is genuinely ambiguous or you are unsure, choose the MORE restrictive safety tier (prefer refuse over caution, and caution over safe). It is safer to over-warn than to under-warn. The legal tier is chosen by the type of question (it asks about permits, code, liability, or responsibility), not by severity, so it is not part of this safety ordering.
 
 OUTPUT FORMAT. Respond with EXACTLY two lines and nothing else:
-Reason: <one sentence that names the worst-case consequence and whether this is a like-for-like swap or new-wire, permit, or structural work>
-Tier: <safe or caution or refuse>
+Reason: <one sentence that names either the worst-case consequence and whether this is a like-for-like swap or new-wire, permit, or structural work, or, for a legal question, what permit, code, liability, or responsibility issue it raises>
+Tier: <safe, caution, refuse, or legal>
 
 Do not add markdown, quotes, bullet points, or any other text."""
 
@@ -75,6 +83,10 @@ _FEW_SHOT = [
         "How do I replace a bathroom faucet?",
         "Reason: Replacing a faucet is a like-for-like fixture swap on existing supply lines whose worst case is a recoverable leak.\nTier: caution",
     ),
+    (
+        "Do I need a permit to build a deck in my backyard?",
+        "Reason: This asks whether a permit is required rather than how to perform the work, so it is a permit and code-compliance question.\nTier: legal",
+    ),
 ]
 
 
@@ -100,11 +112,15 @@ _TIER_VARIANTS = {
     "refuse": "refuse",
     "refused": "refuse",
     "refusal": "refuse",
+    "legal": "legal",
+    "legally": "legal",
+    "legality": "legal",
 }
 
-# Priority order for the keyword fallback: most restrictive wins, so a response
-# that mentions two tiers resolves to the safer one.
-_TIER_PRIORITY = ["refuse", "caution", "safe"]
+# Priority order for the keyword fallback: most restrictive safety tier wins, so
+# a response that mentions two tiers resolves to the safer one. "legal" is last
+# so it is only chosen when no safety tier is present in the text.
+_TIER_PRIORITY = ["refuse", "caution", "safe", "legal"]
 
 
 def _normalize_tier(raw: str) -> str:
@@ -150,7 +166,7 @@ def _parse_tier_and_reason(text: str) -> tuple[str, str]:
 
 def classify_safety_tier(question: str) -> dict:
     """
-    Classify a home repair question into one of three safety tiers.
+    Classify a home repair question into one of four tiers.
 
     LLM-as-judge classifier (see specs/classifier-spec.md). Sends one Groq chat
     completion built from a tier-definition system prompt plus a contrastive
@@ -158,8 +174,11 @@ def classify_safety_tier(question: str) -> dict:
     the tier against VALID_TIERS, and fails closed to "caution" on any error or
     unparseable output.
 
+    Tiers: "safe", "caution", "refuse" (the safety axis) and "legal" (permit,
+    code, liability, or responsibility questions; added in optional challenge 4).
+
     Returns a dict with:
-      - "tier"   : str — one of "safe", "caution", "refuse"
+      - "tier"   : str — one of "safe", "caution", "refuse", "legal"
       - "reason" : str — a brief explanation of why this tier was assigned
     """
     fallback = {
