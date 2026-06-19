@@ -43,8 +43,9 @@ Record every interaction — question, safety tier, and response preview — to 
 | `"tier"` | `str` | Safety tier assigned to this question |
 | `"question"` | `str` | The user's question, truncated to 300 characters |
 | `"response_preview"` | `str` | First 200 characters of the generated response |
-| `[your field]` | `[type]` | [description] |
-| `[your field]` | `[type]` | [description] |
+| `"model"` | `str` | The LLM model id from config (`LLM_MODEL`) that produced this interaction |
+| `"response_chars"` | `int` | Full length of the response before truncation |
+| `"question_chars"` | `int` | Full length of the question before truncation |
 
 ---
 
@@ -53,7 +54,11 @@ Record every interaction — question, safety tier, and response preview — to 
 *The required fields truncate the question to 300 characters and the response to 200. Write down the reasoning for each — what would you lose by truncating more aggressively, and what's the risk of logging the full text at production scale?*
 
 ```
-[your answer here]
+Question -> 300 chars: real repair questions are short, so 300 captures essentially every genuine question in full while still bounding storage and stopping a pasted wall of text or an injected payload from bloating the log. Truncating harder, say to 100, would clip the multi-sentence framing that is exactly what you need to diagnose a misclassification (for example "I just want to move my switch six inches, it's a tiny job"). The framing is the diagnostic signal, so it is worth keeping.
+
+Response -> 200 chars: you only need enough to identify which response was given, and the opening sentence already reveals the tier behavior (a refuse answer starts by declining, a safe answer starts listing tools). The full response is reproducible from the question plus the tier, so storing it adds little diagnostic value.
+
+Risk of logging full text at production scale: at 10,000 questions a day, full responses multiply log size and slow every downstream scan, and they retain far more user-entered content (which can include names, addresses, or other personal details), which raises privacy and retention-compliance exposure. The preview plus the full-length counts (response_chars) give you the signal to spot anomalies without storing everything.
 ```
 
 ---
@@ -63,7 +68,9 @@ Record every interaction — question, safety tier, and response preview — to 
 *What happens if `logs/` doesn't exist when the function runs for the first time? How will you handle that — and why is this worth thinking about at all?*
 
 ```
-[your answer here]
+Call os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True) before opening the file for append. exist_ok=True makes it a no-op when the directory is already there, so it is safe to run every time.
+
+This is worth handling because logs/ may not exist on a fresh clone or a new deployment. The logs/.gitkeep file only keeps the directory in git; a checkout that ignores empty directories, a container build, or a different runtime can all start without it. Without the makedirs call the first write raises FileNotFoundError. Logging is a side effect that runs after the user's answer is already generated, so a logging failure must never crash the user-facing request. Creating the directory first (and wrapping the write so a failure warns instead of raising) keeps the accountability layer from taking down the service.
 ```
 
 ---
@@ -73,7 +80,12 @@ Record every interaction — question, safety tier, and response preview — to 
 *Write an example of what you want the one-line terminal summary to look like after a question is logged. Be specific about format.*
 
 ```
-[your example output here]
+Format: [LOGGED] tier=<tier> | "<question, trimmed to ~60 chars with an ellipsis>" → <full response length> chars
+
+Example:
+[LOGGED] tier=caution | "How do I replace a bathroom faucet?" → 1287 chars
+
+The tier comes first so a scan of the terminal reads as a tier stream. The question is quoted and trimmed to one line so the summary never wraps. The trailing count is the full response length (not the 200-char preview), which is the quickest signal that something is off, for example a refuse answer that is suspiciously long or a safe answer that is empty.
 ```
 
 ---
@@ -85,11 +97,15 @@ Record every interaction — question, safety tier, and response preview — to 
 **The actual log file content after 3 test queries (paste the three JSON lines):**
 
 ```
-[your answer here]
+{"timestamp": "2026-06-19T18:27:04.095790Z", "tier": "safe", "question": "How do I patch a small hole in drywall?", "response_preview": "To patch a small hole in drywall, you'll need the following tools and materials:\n- 1\" or 2\" putty knife, joint compound, sandpaper (medium and fine grit), paint to match, drywall repair mesh, mud pan,", "model": "llama-3.3-70b-versatile", "response_chars": 875, "question_chars": 39}
+{"timestamp": "2026-06-19T18:27:04.096070Z", "tier": "caution", "question": "How do I replace a bathroom faucet?", "response_preview": "I strongly advise that you proceed with caution. Replacing a bathroom faucet is a DIY project that carries real risk, mainly water damage. If anything looks different from what is described or you fee", "model": "llama-3.3-70b-versatile", "response_chars": 875, "question_chars": 35}
+{"timestamp": "2026-06-19T18:27:04.096124Z", "tier": "refuse", "question": "How do I fix a gas line that smells like it's leaking?", "response_preview": "I'm glad you're taking this seriously. However, fixing a gas line leak is not a safe do-it-yourself repair, and I can't walk you through it. A gas leak carries an extreme risk of explosion, fire, and ", "model": "llama-3.3-70b-versatile", "response_chars": 802, "question_chars": 54}
 ```
 
 **One field you'd add to the log if this were a real production system handling 10,000 questions per day:**
 
 ```
-[your answer here]
+A request_id (a unique id per interaction). At 10,000 questions a day, the way you find a bad entry is a user report or an upstream trace, and without an id you cannot tie "a user got a dangerous answer around 2pm" to a specific log line, or join this record to the API call, the latency trace, and any downstream feedback. A request_id makes every log line addressable and correlatable across systems.
+
+A close second would be latency_ms (classifier plus responder time), which catches timeouts and performance regressions before users complain, and lets you confirm the classifier is actually running rather than silently falling back.
 ```
