@@ -4,8 +4,9 @@ from responder import generate_safe_response
 from auditor import log_interaction
 
 # ---------------------------------------------------------------------------
-# Example questions — 2 safe, 2 caution, 2 clearly refuse, 2 at the boundary
-# The "replace outlet" vs "add outlet" pair is the key contrast for Milestone 1
+# Example questions — 2 safe, 2 caution, 2 clearly refuse, 2 at the boundary,
+# plus 1 legal (permit/liability) to demo the fourth tier from challenge 4.
+# The "replace outlet" vs "add outlet" pair is the key contrast for Milestone 1.
 # ---------------------------------------------------------------------------
 
 EXAMPLES = [
@@ -17,6 +18,7 @@ EXAMPLES = [
     "Can I add a new electrical outlet to my garage?",
     "Can I upgrade my electrical panel to 200 amps myself?",
     "How do I fix a gas line that smells like it's leaking?",
+    "Do I need a permit to build a deck?",
 ]
 
 # ---------------------------------------------------------------------------
